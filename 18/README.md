@@ -5,13 +5,9 @@
 ### Создание тестовой БД
 Для начала создаем тестовую БД:
 ```
--- ДЗ тема: триггеры, поддержка заполнения витрин
-
 DROP SCHEMA IF EXISTS pract_functions CASCADE;
 CREATE SCHEMA pract_functions;
-
 SET search_path = pract_functions, publ
-
 -- товары:
 CREATE TABLE goods
 (
@@ -19,9 +15,6 @@ CREATE TABLE goods
     good_name   varchar(63) NOT NULL,
     good_price  numeric(12, 2) NOT NULL CHECK (good_price > 0.0)
 );
-INSERT INTO goods (goods_id, good_name, good_price)
-VALUES 	(1, 'Спички хозайственные', .50),
-		(2, 'Автомобиль Ferrari FXX K', 185000000.01);
 
 -- Продажи
 CREATE TABLE sales
@@ -32,7 +25,6 @@ CREATE TABLE sales
     sales_qty   integer CHECK (sales_qty > 0)
 );
 
-INSERT INTO sales (good_id, sales_qty) VALUES (1, 10), (1, 1), (1, 120), (2, 1);
 -- с увеличением объёма данных отчет стал создаваться медленно
 -- Принято решение денормализовать БД, создать таблицу
 CREATE TABLE good_sum_mart
@@ -50,54 +42,88 @@ INNER JOIN sales S ON S.good_id = G.goods_id
 GROUP BY G.good_name;
 ```
 ### Создать триггер для поддержки витрины в актуальном состоянии
-Анализируя скрипт который ранее составлял отчет, видим, что он собирает данные с 2-х таблиц, из чего следует что на обе таблицы придется добавлять триггеры.
-Чтобы не копировать код расчета, составим функцию:
+Далее для поддержания в актуальном состоянии отчетной таблицы, создаем триггер
 ```
-CREATE FUNCTION updateReportSum(goodId integer) RETURNS void AS $$
-DECLARE goodSum numeric(16, 2);
+CREATE OR REPLACE FUNCTION onSalesChange() RETURNS TRIGGER AS $$
+DECLARE goodId integer;
 DECLARE goodName varchar(63);
+DECLARE goodSum numeric(16, 2);
 BEGIN
-SELECT sum(G.good_price * S.sales_qty) INTO goodSum
-FROM goods G
-INNER JOIN sales S ON S.good_id = G.goods_id AND G.goods_id = goodId
-GROUP BY G.good_name;
-SELECT good_name INTO goodName FROM goods WHERE goods_id = goodId;
-IF goodSum IS NULL THEN
-  DELETE FROM good_sum_mart WHERE good_name = good_name;
-ELSEIF EXISTS (SELECT * FROM good_sum_mart WHERE good_name IN (SELECT good_name FROM goods WHERE goods_id = goodId)) THEN
-  UPDATE good_sum_mart SET sum_sale = goodSum WHERE good_name = goodName;
-ELSE
-  INSERT INTO good_sum_mart VALUES (goodName, goodSum);
-END IF;
+  IF TG_OP = 'DELETE' THEN
+    goodId = OLD.good_id;
+  ELSE
+    goodId = NEW.good_id;
+  END IF;
+
+  SELECT good_name INTO goodName FROM goods WHERE goods_id = goodId;
+  SELECT sum(G.good_price * S.sales_qty) INTO goodSum
+  FROM goods G
+    INNER JOIN sales S ON S.good_id = G.goods_id AND G.goods_id = goodId
+  GROUP BY G.good_name;
+
+  IF NOT EXISTS(SELECT * FROM sales WHERE good_id = goodId) THEN
+    DELETE FROM good_sum_mart WHERE good_name = goodName;
+  ELSEIF NOT EXISTS (SELECT * FROM good_sum_mart WHERE good_name = goodName) THEN
+    INSERT INTO good_sum_mart VALUES (goodName, goodSum);
+  ELSE
+    UPDATE good_sum_mart SET sum_sale = goodSum WHERE good_name = goodName;
+  END IF;
+  RETURN NULL;
 END $$
 LANGUAGE PLPGSQL;
-```
-Далее для поддержания в актуальном состоянии отчетной таблицы, создаем 2 триггера
-```
-CREATE FUNCTION onSalesChange() RETURNS trigger AS $sales$
-BEGIN
-  IF NEW IS NULL THEN
-    SELECT updateReportSum(NEW.good_id);
-  ELSE
-    SELECT updateReportSum(OLD.good_id);
-  END IF;
-END;
-$sales$ LANGUAGE PLPGSQL;
+
 CREATE TRIGGER sales_OnChange AFTER INSERT OR UPDATE OR DELETE ON sales
 FOR EACH ROW
-EXECUTE FUNCTION onSalesChange();
-
-CREATE TRIGGER goods_OnChange AFTER INSERT OR UPDATE OR DELETE ON goods
-FOR EACH ROW
-BEGIN
-  IF :new IS NULL THEN
-    SELECT updateReportSum(:old.goods_id);
-  ELSE
-    SELECT updateReportSum(:new.goods_id);
-  END IF;
-END;
+EXECUTE PROCEDURE onSalesChange();
 ```
+Начинаем заполнение данными, при этом проверяем витрину, чтобы убедиться что наши триггеры корректно работают:
+```
+postgres=# INSERT INTO goods (goods_id, good_name, good_price) VALUES (1, 'Спички хозайственные', .50), (2, 'Автомобиль Ferrari FXX K', 185000000.01);
+INSERT 0 2
+postgres=# INSERT INTO sales (good_id, sales_qty) VALUES (1, 10), (1, 1), (1, 120), (2, 1);
+INSERT 0 4
+postgres=# SELECT * FROM good_sum_mart;
+        good_name         |   sum_sale   
+--------------------------+--------------
+ Спички хозайственные     |        65.50
+ Автомобиль Ferrari FXX K | 185000000.01
+(2 rows)
+```
+> [!NOTE]
+> Начальное заполнение прошло правильно, и отчет сформирован.
+
+Продадим еще одну Ferrari
+```
+postgres=# INSERT INTO sales (good_id, sales_qty) VALUES(2, 1);
+INSERT 0 1
+postgres=# SELECT * FROM good_sum_mart;
+        good_name         |   sum_sale   
+--------------------------+--------------
+ Спички хозайственные     |        65.50
+ Автомобиль Ferrari FXX K | 370000000.02
+(2 rows)
+```
+> [!NOTE]
+> Сумма увеличилась.
+
+Напоследок, все Ferrari вернули через суд
+```
+postgres=# DELETE FROM sales WHERE good_id = 2;
+DELETE 2
+postgres=# SELECT * FROM good_sum_mart;
+      good_name       | sum_sale 
+----------------------+----------
+ Спички хозайственные |    65.50
+(1 row)
+```
+> [!NOTE]
+> Как видим, триггер корректно заполняет наш отчет, как при вставке данных, так и при удалении.
+
 ### Преимущества схемы с триггером
 1) Ниже время доступа к отчету (его не нужно каждый раз собирать заново)
 2) Разравнивается нагрузка на сервер (если отчет тяжелый, он будет вызывать пики нагрузки, а с триггером нагрузка будет распределена по всем моментам изменения данных)
 3) Ничто не мешает теперь проиндексировать наш отчет, чтобы он работал еще быстрее
+4) Если отчет собирать по требованию, то придется фиксировать историю цен, чтобы реагировать на ситуации, когда цена товара изменилась, и скажем до одной даты продажи надо считать по одной цене, а после - по другой.
+
+> [!NOTE]
+> Однако мое мнение что п.4 - не очень аргумент. Историю цен скорее всего все равно придется делать, как покаызвает практика. Это преимущество только для такого упрощенного случая, в реальности же настоящее преимущество тут как мне кажется это п.2.
