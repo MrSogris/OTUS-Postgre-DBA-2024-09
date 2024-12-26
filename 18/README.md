@@ -45,29 +45,31 @@ GROUP BY G.good_name;
 Далее для поддержания в актуальном состоянии отчетной таблицы, создаем триггер
 ```
 CREATE OR REPLACE FUNCTION onSalesChange() RETURNS TRIGGER AS $$
-DECLARE goodId integer;
-DECLARE goodName varchar(63);
-DECLARE goodSum numeric(16, 2);
+DECLARE deletedCount integer;
 BEGIN
-  IF TG_OP = 'DELETE' THEN
-    goodId = OLD.good_id;
-  ELSE
-    goodId = NEW.good_id;
-  END IF;
+    WITH deleted AS (
+        DELETE FROM good_sum_mart WHERE sum_sale = 0 AND TG_OP = 'DELETE' AND good_name IN (SELECT good_name FROM goods WHERE goods_id = OLD.good_id) RETURNING good_name
+    )
+    SELECT COUNT(*) INTO deletedCount FROM deleted;
 
-  SELECT good_name INTO goodName FROM goods WHERE goods_id = goodId;
-  SELECT sum(G.good_price * S.sales_qty) INTO goodSum
-  FROM goods G
-    INNER JOIN sales S ON S.good_id = G.goods_id AND G.goods_id = goodId
-  GROUP BY G.good_name;
-
-  IF NOT EXISTS(SELECT * FROM sales WHERE good_id = goodId) THEN
-    DELETE FROM good_sum_mart WHERE good_name = goodName;
-  ELSEIF NOT EXISTS (SELECT * FROM good_sum_mart WHERE good_name = goodName) THEN
-    INSERT INTO good_sum_mart VALUES (goodName, goodSum);
-  ELSE
-    UPDATE good_sum_mart SET sum_sale = goodSum WHERE good_name = goodName;
-  END IF;
+    IF deletedCount = 0 THEN
+        MERGE INTO good_sum_mart m
+        USING (
+            SELECT good_name AS goodName, 
+                SUM(good_price * COALESCE(sales_qty, 0)) AS actualGoodSum 
+            FROM goods 
+                LEFT JOIN sales ON good_id = goods_id
+            WHERE goods_id = CASE WHEN TG_OP = 'DELETE' THEN OLD.good_id ELSE NEW.good_id END
+            GROUP BY good_name
+        ) AS t
+        ON m.good_name = t.goodName
+        WHEN MATCHED THEN
+            UPDATE SET sum_sale = actualGoodSum
+        WHEN NOT MATCHED THEN
+            INSERT (good_name, sum_sale)
+            VALUES (goodName, actualGoodSum);
+    END IF;
+    
   RETURN NULL;
 END $$
 LANGUAGE PLPGSQL;
