@@ -1,27 +1,84 @@
-Для выполнения задания нам надо в идеале получить 3 таблицы, оформляем:
+# Задание 13
+## Сбор и использование статистики 
+> [!NOTE]
+> ДЗ выполнялось на машине с Win 10. Был установлен Docker desktop, а дальнейшие манипуляции производились над образом *postgres* 15.8
+### Тестовая БД
+Для выполнения задания нам надо в идеале получить 3 таблицы, оформляем как пример, базу данных - "Рабочие проекты"
 ```
-CREATE TABLE carClasses(classCode VARCHAR(2) NOT NULL PRIMARY KEY, description NVARCHAR(2000));
-CREATE TABLE bmwSeries(serie INTEGER, carClassesClassCode VARCHAR(2) NOT NULL REFERENCES carClasses(classCode));
-CREATE TABLE bmwEngineTypes(typeCode VARCHAR(2) NOT NULL PRIMARY KEY);
-CREATE TABLE bmwEngines(id SERIAL NOT NULL PRIMARY KEY, displacement NUMERIC (2, 1), bmwEngineTypesTypeCode VARCHAR(2) REFERENCES bmwEngineTypes(typeCode));
+CREATE TABLE managers(id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL);
+INSERT INTO managers (name) VALUES ('John'), ('Paul'), ('George'), ('Richard');
+CREATE TABLE projects(id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, managerId INTEGER REFERENCES managers(id));
+INSERT INTO projects (name, managerId) VALUES ('lostProject', NULL), ('futureProject', NULL);
+INSERT INTO projects (name, managerId)
+SELECT CASE WHEN name = 'John' THEN 'Please pleas me' WHEN name = 'Paul' THEN 'Abbey Road' WHEN name = 'George' THEN 'Get back' END AS name, id AS managerId FROM managers WHERE name <> 'Richard';
+CREATE TABLE workdays(workday DATE PRIMARY KEY);
+INSERT INTO workdays(workday)
+SELECT to_date('2025-01-01', 'YYYY-MM-DD') + s.a As workday FROM generate_series (0, 364) AS s(a) WHERE EXTRACT (dow FROM to_date('2025-01-01', 'YYYY-MM-DD') + s.a) NOT IN (0, 6);
 ```
 ### Прямое соединение
-Выведем серии автомобилей и их принадлежность к классам
+Вывод проектов у которых назначены менеджеры
 ```
-SELECT bs.serie, cc.classCode FROM carClasses cc JOIN bmwSeries bs ON cc.classCode = bs.carClassesClassCode;
+postgres=# SELECT m.name AS managerName, p.name AS projectName FROM managers m JOIN projects p ON m.id = p.managerId;
+ managername |   projectname   
+-------------+-----------------
+ John        | Please pleas me
+ Paul        | Abbey Road
+ George      | Get back
+(3 rows)
 ```
-### Левостороннее соединение
-Определим, какие классы автомобилей концерн пока еще не закрыл
+### Правоороннее соединение
+Вывод всех проектов независимо от наличия менеджера
 ```
-SELECT classCode FROM carClasses cc LEFT JOIN bmwSeries bs ON cc.classCode = bs.carClassesClassCode WHERE bs.serie IS NULL;
-```
-### Кросс-соединение
-Определяем все возможные сейчас наименования моделей c ДВС
-```
-SELECT serie::varchar(1)|(displacement*10)::varchar(2)|bet.typeCode FROM bmwSeries bs CROSS JOIN bmwEngines be JOIN bmwEngineTypes bet ON bet.typeCode = be.bmwEngineTypesTypeCode WHERE be.bmwEngineTypesTypeCode IS NOT NULL;
+postgres=# SELECT m.name AS managerName, p.name AS projectName FROM managers m RIGHT JOIN projects p ON m.id = p.managerId;
+ managername |   projectname   
+-------------+-----------------
+             | lostProject
+             | futureProject
+ John        | Please pleas me
+ Paul        | Abbey Road
+ George      | Get back
+(5 rows)
 ```
 ## Полное соединение
-Выведем сводную таблицу по ДВС и моделям
+Сводная таблица проектов и менеджеров
 ```
-SELECT bs.serie, bet.typeCode, be.displacement FROM bmwSeries bs CROSS JOIN bmwEngines be FULL JOIN bmwEngineTypes bet ON bet.typeCode = be.bmwEngineTypesTypeCode;
+postgres=# SELECT m.name AS managerName, p.name AS projectName FROM managers m FULL JOIN projects p ON m.id = p.managerId;
+ managername |   projectname   
+-------------+-----------------
+             | lostProject
+             | futureProject
+ John        | Please pleas me
+ Paul        | Abbey Road
+ George      | Get back
+ Richard     | 
+(6 rows)
 ```
+### Кросс-соединение
+Посчитаем сколько человеко-часов у нас есть
+```
+postgres=# SELECT COUNT(*) * 8 AS employeeHours FROM workdays w CROSS JOIN managers m;
+ employeehours 
+---------------
+          8352
+(1 row)
+```
+### Разные типы в одном запросе
+Выведем полный отчет по рабочим часам в проектах у которых есть менеджеры
+```
+postgres=# SELECT m.name, p.name, w.workday FROM managers m JOIN projects p ON m.id = p.managerId CROSS JOIN workdays w ORDER BY workday LIMIT 10;
+  name  |      name       |  workday   
+--------+-----------------+------------
+ John   | Please pleas me | 2025-01-01
+ Paul   | Abbey Road      | 2025-01-01
+ George | Get back        | 2025-01-01
+ John   | Please pleas me | 2025-01-02
+ Paul   | Abbey Road      | 2025-01-02
+ George | Get back        | 2025-01-02
+ John   | Please pleas me | 2025-01-03
+ Paul   | Abbey Road      | 2025-01-03
+ George | Get back        | 2025-01-03
+ John   | Please pleas me | 2025-01-06
+(10 rows)
+```
+> [!NOTE]
+> Ограничил тут вывод, чтобы не раздувать отчет.
