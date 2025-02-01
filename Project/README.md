@@ -41,22 +41,59 @@ CREATE TABLE scenarios (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, descr
 ```
 CREATE TABLE nonScenarioTables (tableName VARCHAR(255) PRIMARY KEY);
 ```
+Получение списка таблиц для копирования:
+```
+CREATE VIEW scenarioTables AS
+SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name NOT IN (SELECT tableName FROM nonScenarioTables);
+```
+Получение данных по внешним ключам таблиц
+```
+CREATE VIEW scenarioTableForeignKeys AS
+select kcu.table_name as fk_table,
+       rel_tco.table_name as pk_table,
+       kcupk.column_name as pk_column,
+       kcu.column_name as fk_column
+from information_schema.table_constraints tco
+join information_schema.key_column_usage kcu
+          on tco.constraint_schema = kcu.constraint_schema
+          and tco.constraint_name = kcu.constraint_name
+join information_schema.referential_constraints rco
+          on tco.constraint_schema = rco.constraint_schema
+          and tco.constraint_name = rco.constraint_name
+join information_schema.table_constraints rel_tco
+          on rco.unique_constraint_schema = rel_tco.constraint_schema
+          and rco.unique_constraint_name = rel_tco.constraint_name
+join information_schema.key_column_usage kcupk
+          on rel_tco.constraint_schema = kcupk.constraint_schema
+          and rel_tco.constraint_name = kcupk.constraint_name
+where tco.constraint_type = 'FOREIGN KEY'
+order by kcu.table_schema,
+         kcu.table_name;
+```
 ### Организация работы со служебными таблицами
 Процедура создания слепка
 ```
-CREATE FUNCTION addScenario(name NVARCHAR(255), description TEXT, createdByUsername NVARCHAR(255), sourceScenarioId INT) RETURNS INTEGER AS $$
+CREATE FUNCTION addScenario(name NVARCHAR(255), description TEXT, createdByUsername NVARCHAR(255), sourceScenarioId INT DEFAULT NULL) RETURNS INTEGER AS $$
 DECLARE inserted_id INTEGER;
 BEGIN
   INSERT INTO scenarios (name, description, createdByUsername) VALUES (name, description, createdByUsername) RETURNING id INTO inserted_id;
+
+  IF sourceScenarioId IS NOT NULL THEN
+    
+  END IF
 
   RETURN inserted_id AS id;
 END
 $$
 LANGUAGE PLPGSQL;
 ```
+Обновление информации о слепке по сути касается только его имени и описания
+```
+CREATE FUNCTION updateScenario(id INTEGER, newName VARCHAR(255))
+```
 По удалению слепков было решено выполнить его асинхронным. Т.е. по факту при запросе на удаление будет лишь ставиться флаг удаления, а настоящее удаление запускать планировщиком во время простоев системы (по ночам). В связи с этим процедуры будет 2.
 ```
-CREATE FUNCTION deleteScenario(id INT) RETURNS void AS $$
+CREATE FUNCTION deleteScenario(id INTEGER) RETURNS void AS $$
 BEGIN
   UPDATE scenarios s SET isDeleted = true WHERE s.id = id;
 END
@@ -68,21 +105,8 @@ LANGUAGE PLPGSQL;
 1) Удаление данных должно начинаться с тех таблиц, которые не являются родителями в иерархии внешних ключей данных.
 2) Вставка данных в новый слепок должна наоборот, начинаться с таблиц которые сами не содержат внешних ключей. При этом еще и надо понимать что вставляя данные с существующего слепка для реализации п.3 требований, нам нужно будет перезаписывать значения внешних ключей, т.к. в новом сценарии они будут другими.
 Определимся с базовыми запросами, которые нам понадобятся для реализации процедур создания и удаления слепков.
-Получение списка таблиц для копирования:
-```
-CREATE VIEW scenarioTables AS
-SELECT t.relname FROM pg_class t WHERE t.reltype IN (SELECT oid FROM typname = 'rel') AND t.relname NOT IN (SELECT tableName FROM nonScenarioTables);
-```
-Получение данных по внешним ключам таблиц
-```
-CREATE VIEW scenarioTableForeignKeys AS
-SELECT (select  r.relname from pg_class r where r.oid = c.confrelid) as pkTable,
-       a.attname as pkColumn,
-       (select r.relname from pg_class r where r.oid = c.conrelid) as fkTable,
-       UNNEST((select array_agg(attname) from pg_attribute where attrelid = c.conrelid and array[attnum] <@ c.conkey)) as fkColumn
-FROM pg_constraint c join pg_attribute a on c.confrelid=a.attrelid and a.attnum = ANY(confkey)
-WHERE c.confrelid = (select oid from pg_class where relname IN (SELECT * FROM scenarioTables))   AND c.confrelid!=c.conrelid;
-```
+
+
 Теперь можем реализовать удаление данных:
 ```
 CREATE PROCEDURE deleteScenarioData()
