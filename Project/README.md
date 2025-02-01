@@ -35,7 +35,7 @@ CREATE TABLE someTable(id SERIAL PRIMARY KEY, scenarioId int REFERENCES scenario
 ## Реализация
 Таблица, в которой будем хранить информацию о слепках:
 ```
-CREATE TABLE scenarios (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, description TEXT NULL, timestampOfCreation DATETIME NOT NULL, createdByUsername VARCHAR(255) NOT NULL, isDeleted BOOLEAN DEFAULT false);
+CREATE TABLE scenarios (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, description TEXT NULL, timestampOfCreation TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, createdByUsername VARCHAR(255) NOT NULL, isDeleted BOOLEAN DEFAULT false);
 ```
 Таблица для учета несценарных таблиц:
 ```
@@ -44,17 +44,24 @@ CREATE TABLE nonScenarioTables (tableName VARCHAR(255) PRIMARY KEY);
 ### Организация работы со служебными таблицами
 Процедура создания слепка
 ```
-CREATE PROCEDURE addScenario(name NVARCHAR(255), description TEXT, authorUsername NVARCHAR(255))
+CREATE FUNCTION addScenario(name NVARCHAR(255), description TEXT, createdByUsername NVARCHAR(255), sourceScenarioId INT) RETURNS INTEGER AS $$
+DECLARE inserted_id INTEGER;
 BEGIN
-  INSERT INTO scenarios (name, description, timestampOfCreation, createdByUsername) VALUES (name, description, NOW(), authorUsername);
+  INSERT INTO scenarios (name, description, createdByUsername) VALUES (name, description, createdByUsername) RETURNING id INTO inserted_id;
+
+  RETURN inserted_id AS id;
 END
+$$
+LANGUAGE PLPGSQL;
 ```
 По удалению слепков было решено выполнить его асинхронным. Т.е. по факту при запросе на удаление будет лишь ставиться флаг удаления, а настоящее удаление запускать планировщиком во время простоев системы (по ночам). В связи с этим процедуры будет 2.
 ```
-CREATE PROCEDURE deleteScenario(id INT)
+CREATE FUNCTION deleteScenario(id INT) RETURNS void AS $$
 BEGIN
   UPDATE scenarios s SET isDeleted = true WHERE s.id = id;
 END
+$$
+LANGUAGE PLPGSQL;
 ```
 ### Организация работы со справочными таблицами
 Основная сложность данной задачи заключается в том, что нам надо не просто динамически получать список существующих таблиц, но и учитывать связи между ними:
