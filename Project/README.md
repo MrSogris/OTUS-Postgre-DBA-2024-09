@@ -108,10 +108,6 @@ LANGUAGE PLPGSQL;
 Основная сложность данной задачи заключается в том, что нам надо не просто динамически получать список существующих таблиц, но и учитывать связи между ними:
 1) Удаление данных должно начинаться с тех таблиц, которые не являются родителями в иерархии внешних ключей данных.
 2) Вставка данных в новый слепок должна наоборот, начинаться с таблиц которые сами не содержат внешних ключей. При этом еще и надо понимать что вставляя данные с существующего слепка для реализации п.3 требований, нам нужно будет перезаписывать значения внешних ключей, т.к. в новом сценарии они будут другими.
-Определимся с базовыми запросами, которые нам понадобятся для реализации процедур создания и удаления слепков.
-
-
-Теперь можем реализовать удаление данных:
 ```
 CREATE PROCEDURE utils.deleteScenarioData() AS $$
 DECLARE currentTableName VARCHAR(500);
@@ -127,7 +123,6 @@ BEGIN
       
       EXECUTE deleteQuery;
       INSERT INTO clearedTables(tableName) VALUES(currentTableName);
-      RAISE NOTICE 'cleared table %', currentTableName;
     END LOOP;
     DROP TABLE clearedTables;    
     DELETE FROM utils.scenarios Where id = scenarioTableRow.id;
@@ -161,6 +156,7 @@ END
 5) Объемы производства
 6) Логистика между городами и затраты на нее
 
+Для размещения рабочих данных создадим схему *data*.
 Скрипт для быстрого создания тестовой структуры и данных в ней:
 ```
 CREATE DATABASE work;
@@ -180,5 +176,32 @@ CREATE SCHEMA utils;
 --Далее используем определения объектов сделанные ранее, но с учетом схемы.
 -- Определяем несценарные таблицы
 INSERT INTO utils.nonScenarioTables (tableName) VALUES ('cities'), ('plants');
+--Создаем начальный сценарий и заполним его данными
+CALL utils.addScenario('initial', 'initial scenario', 'Vasya', 0, NULL);
+INSERT INTO data.cities(name) VALUES ('Moscow'), ('Sankt-Peterburg'), ('Kaliningrad'), ('Samara'), ('Ekaterinburg'), ('Omsk'), ('Tomsk'), ('Kemerovo'), ('Novosibirsk'), ('Krasnoyarsk'), ('Irkutsk'), ('Khabarovsk'), ('Vladivostok');
+INSERT INTO data.plants(name, cityId) SELECT md5(random()::text) as name, c.id FROM generate_series(1, 2) t1 CROSS JOIN data.cities c;
+INSERT INTO data.products(scenarioId, name, price) SELECT id, md5(random()::text) as name, random() * 100 as price FROM generate_series(1, 10) CROSS JOIN utils.scenarios;
+INSERT INTO data.production(scenarioId, plantId, productId, volume) SELECT s.id, p.id, pr.id, random() *  1000 as volume FROM utils.scenarios s CROSS JOIN data.plants p CROSS JOIN data.products pr;
+INSERT INTO data.buyers(scenarioId, name, cityId, budget) SELECT s.id, md5(random()::text) as name, c.id, random() * 10000 FROM generate_series(1, 5) t1 CROSS JOIN data.cities c CROSS JOIN utils.scenarios s;
+INSERT INTO data.logistics(scenarioId, cityFromId, cityToId, costPerUnit) SELECT s.id, c1.id, c2.id, random() * 10 FROM utils.scenarios s CROSS JOIN data.cities c1 JOIN data.cities c2 ON c1.id <> c2.id;
 ```
-Теперь можем создавать и удалять сценарии
+### Тестовые операции
+Создаем новый пустой сценарий **Test 2**
+```
+work=# CALL utils.addScenario('Test2', NULL, 'Ivanov Ivan', 0, NULL);
+ createdscenarioid 
+-------------------
+                 4
+(1 row)
+
+work=# SELECT * FROM utils.scenarios;
+ id |  name   |   description    |    timestampofcreation     | createdbyusername | isdeleted 
+----+---------+------------------+----------------------------+-------------------+-----------
+  3 | initial | initial scenario | 2025-02-02 15:16:53.39401  | Vasya             | f
+  4 | Test2   |                  | 2025-02-02 15:43:32.703312 | Ivanov Ivan       | f
+(2 rows)
+```
+А теперь попробуем создать новый сценарий, но на базе уже нашего сгенерированного и полного данных:
+```
+CALL utils.addScenario('initial copy', 'copied from initial', 'Vasya', 0, 3);
+```
