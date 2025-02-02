@@ -41,18 +41,19 @@ CREATE TABLE scenarios (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, descr
 ```
 CREATE TABLE nonScenarioTables (tableName VARCHAR(255) PRIMARY KEY);
 ```
+Для того, чтобы не переписывать каждый раз при добавлении таблиц все скрипты, будем автоматически собирать о них информацию.
 Получение списка таблиц для копирования:
 ```
 CREATE VIEW scenarioTables AS
-SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name NOT IN (SELECT tableName FROM nonScenarioTables);
+SELECT table_name AS tableName FROM information_schema.tables WHERE table_schema = 'some_schema' AND table_type = 'BASE TABLE'  AND table_name NOT IN (SELECT tableName FROM nonScenarioTables);
 ```
 Получение данных по внешним ключам таблиц
 ```
 CREATE VIEW scenarioTableForeignKeys AS
-select kcu.table_name as fk_table,
-       rel_tco.table_name as pk_table,
-       kcupk.column_name as pk_column,
-       kcu.column_name as fk_column
+select kcu.table_name as fkTable,
+       rel_tco.table_name as pkTable,
+       kcupk.column_name as pkColumn,
+       kcu.column_name as fkColumn
 from information_schema.table_constraints tco
 join information_schema.key_column_usage kcu
           on tco.constraint_schema = kcu.constraint_schema
@@ -66,9 +67,7 @@ join information_schema.table_constraints rel_tco
 join information_schema.key_column_usage kcupk
           on rel_tco.constraint_schema = kcupk.constraint_schema
           and rel_tco.constraint_name = kcupk.constraint_name
-where tco.constraint_type = 'FOREIGN KEY'
-order by kcu.table_schema,
-         kcu.table_name;
+where tco.constraint_type = 'FOREIGN KEY' AND kcu.table_schema = 'some_schema';
 ```
 ### Организация работы со служебными таблицами
 Процедура создания слепка
@@ -109,21 +108,23 @@ LANGUAGE PLPGSQL;
 
 Теперь можем реализовать удаление данных:
 ```
-CREATE PROCEDURE deleteScenarioData()
-BEGIN
-  BEGIN TRAN;  
+CREATE PROCEDURE deleteScenarioData() AS $$
+DECLARE deleteQuery VARCHAR(2000);
+DECLARE scenarioTableRow scenarios%rowtype;
+BEGIN  
   FOR scenarioTableRow in SELECT * FROM scenarios WHERE isDeleted = true LOOP
     CREATE TEMP TABLE clearedTables (tableName VARCHAR(255));
-    WHILE EXISTS (SELECT * FROM scenarioTables WHERE tableName NOT IN (SELECT * FROM clearedTables))
-      SELECT @deleteQuery = '' FROM scenarioTables WHERE tableName NOT IN (SELECT pkTable FROm scenarioTableForeignKeys WHERE pkTable NOT IN (SELECT tableName FROM clearedTables));
+    WHILE EXISTS (SELECT * FROM scenarioTables WHERE tableName NOT IN (SELECT tableName FROM clearedTables)) LOOP
+      SELECT @deleteQuery = 'DELETE FROM "'||table_name||'" WHERE scenarioId='||scenarioTableRow.id::varchar(255) FROM scenarioTables WHERE table_name NOT IN (SELECT pk_Table FROM scenarioTableForeignKeys WHERE pk_Table NOT IN (SELECT tableName FROM clearedTables));
       EXECUTE @deleteQuery;
-  END LOOP;
+    END LOOP;
     DROP TABLE clearedTables;
   END LOOP;
 
   DELETE FROM scenarios Where isDeleted = true;
-  COMMIT;
 END
+$$
+LANGUAGE PLPGSQL;
 ```
 Копирование данных слепка
 ```
@@ -137,3 +138,37 @@ BEGIN
     DROP TABLE clearedTables;
 END
 ```
+### Тестовый набор справочников
+Для теста создадим достаточно типичную легенду.
+> [!NOTE]
+> Федеральная группа компаний ООО "Вектор" занимается производством неких сыпучих или жидких продуктов в промышленных масштабах и продает их оптовым клиентам. Заводы раскиданы по всей стране, как и покупатели. Необходимо обеспечить возможность хранить и анализировать различные варианты объемов производства и цен на продукты в зависимости от предполагаемых затрат на транспортировку по плечу *завод - покупатель* и предполагаемых бюджетов покупателя на выкуп.
+
+Основные сущности будут:
+1) Города
+2) Заводы
+3) Клиенты
+4) Продукты
+5) Объемы производства
+6) Логистика между городами и затраты на нее
+
+Скрипт для быстрого создания тестовой структуры и данных в ней:
+```
+CREATE DATABASE work;
+\c work
+CREATE SCHEMA data;
+CREATE TABLE data.cities(id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, UNIQUE(name));
+CREATE TABLE data.plants (id SERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL, cityId INT NOT NULL REFERENCES data.cities(id));
+CREATE TABLE data.products (id SERIAL PRIMARY KEY, scenarioId INTEGER NOT NULL, name VARCHAR(255) NOT NULL, price NUMERIC(6, 2) NOT NULL, UNIQUE(scenarioId, name));
+CREATE TABLE data.production (scenarioId INTEGER NOT NULL, plantId INTEGER NOT NULL REFERENCES data.plants(id), productId INTEGER NOT NULL REFERENCES data.products(id), volume NUMERIC(6, 2) NOT NULL, PRIMARY KEY (scenarioId, plantId, productId));
+CREATE TABLE data.buyers (id SERIAL PRIMARY KEY, scenarioId INTEGER NOT NULL, name VARCHAR(255), cityId INTEGER NOT NULL REFERENCES data.cities(id), budget NUMERIC (10, 2) NOT NULL, UNIQUE(scenarioId, name));
+CREATE TABLE data.logistics (scenarioId INTEGER NOT NULL, cityFromId INTEGER NOT NULL REFERENCES data.cities(id), cityToId INTEGER NOT NULL REFERENCES data.cities(id), costPerUnit NUMERIC(6, 2) NOT NULL, PRIMARY KEY (scenarioId, cityFromId, cityToId));
+```
+Управляющие объекты разместим в схеме *utils*
+```
+\c work
+CREATE SCHEMA utils;
+--Далее используем определения объектов сделанные ранее, но с учетом схемы.
+-- Определяем несценарные таблицы
+INSERT INTO utils.nonScenarioTables (tableName) VALUES ('cities'), ('plants');
+```
+Теперь можем создавать и удалять сценарии
