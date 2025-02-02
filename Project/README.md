@@ -72,7 +72,7 @@ where tco.constraint_type = 'FOREIGN KEY' AND kcu.table_schema = 'some_schema';
 ### Организация работы со служебными таблицами
 Процедура создания слепка
 ```
-CREATE FUNCTION addScenario(name NVARCHAR(255), description TEXT, createdByUsername NVARCHAR(255), sourceScenarioId INT DEFAULT NULL) RETURNS INTEGER AS $$
+CREATE PROCEDURE addScenario(name NVARCHAR(255), description TEXT, createdByUsername NVARCHAR(255), createdScenarioId OUT INT, sourceScenarioId INT DEFAULT NULL) AS $$
 DECLARE inserted_id INTEGER;
 BEGIN
   INSERT INTO scenarios (name, description, createdByUsername) VALUES (name, description, createdByUsername) RETURNING id INTO inserted_id;
@@ -81,20 +81,25 @@ BEGIN
     
   END IF
 
-  RETURN inserted_id AS id;
+  createdScenarioId = insertedId;
 END
 $$
 LANGUAGE PLPGSQL;
 ```
 Обновление информации о слепке по сути касается только его имени и описания
 ```
-CREATE FUNCTION updateScenario(id INTEGER, newName VARCHAR(255))
+CREATE PROCEDURE utils.updateScenario(updatedScenarioId INTEGER, newName VARCHAR(255), newDescription TEXT) AS $$
+BEGIN
+       UPDATE utils.scenarios SET name = newName, description = newDescription WHERE id = updatedScenarioId;
+END
+$$
+LANGUAGE PLPGSQL;
 ```
 По удалению слепков было решено выполнить его асинхронным. Т.е. по факту при запросе на удаление будет лишь ставиться флаг удаления, а настоящее удаление запускать планировщиком во время простоев системы (по ночам). В связи с этим процедуры будет 2.
 ```
-CREATE FUNCTION deleteScenario(id INTEGER) RETURNS void AS $$
+CREATE PROCEDURE utils.deleteScenario(deletedScenarioId INTEGER) AS $$
 BEGIN
-  UPDATE scenarios s SET isDeleted = true WHERE s.id = id;
+  UPDATE utils.scenarios SET isDeleted = true WHERE id = deletedScenarioId;
 END
 $$
 LANGUAGE PLPGSQL;
@@ -108,20 +113,25 @@ LANGUAGE PLPGSQL;
 
 Теперь можем реализовать удаление данных:
 ```
-CREATE PROCEDURE deleteScenarioData() AS $$
+CREATE PROCEDURE utils.deleteScenarioData() AS $$
+DECLARE currentTableName VARCHAR(500);
 DECLARE deleteQuery VARCHAR(2000);
-DECLARE scenarioTableRow scenarios%rowtype;
+DECLARE scenarioTableRow utils.scenarios%rowtype;
 BEGIN  
-  FOR scenarioTableRow in SELECT * FROM scenarios WHERE isDeleted = true LOOP
+  FOR scenarioTableRow in SELECT * FROM utils.scenarios WHERE isDeleted = true LOOP
     CREATE TEMP TABLE clearedTables (tableName VARCHAR(255));
-    WHILE EXISTS (SELECT * FROM scenarioTables WHERE tableName NOT IN (SELECT tableName FROM clearedTables)) LOOP
-      SELECT @deleteQuery = 'DELETE FROM "'||table_name||'" WHERE scenarioId='||scenarioTableRow.id::varchar(255) FROM scenarioTables WHERE table_name NOT IN (SELECT pk_Table FROM scenarioTableForeignKeys WHERE pk_Table NOT IN (SELECT tableName FROM clearedTables));
-      EXECUTE @deleteQuery;
+    WHILE EXISTS (SELECT 1 FROM utils.scenarioTables WHERE tableName NOT IN (SELECT tableName FROM clearedTables)) LOOP
+      SELECT tableName INTO currentTableName FROM utils.scenarioTables WHERE NOT EXISTS (SELECT 1 FROM utils.scenarioTableForeignKeys WHERE pkTable = tableName AND fkTable NOT IN (SELECT tableName FROM clearedTables)) AND tableName NOT IN (SELECT tableName FROM clearedTables);
+      
+      deleteQuery = 'DELETE FROM data."'||currentTableName||'" WHERE scenarioId='||scenarioTableRow.id::varchar(255)||';'; 
+      
+      EXECUTE deleteQuery;
+      INSERT INTO clearedTables(tableName) VALUES(currentTableName);
+      RAISE NOTICE 'cleared table %', currentTableName;
     END LOOP;
-    DROP TABLE clearedTables;
+    DROP TABLE clearedTables;    
+    DELETE FROM utils.scenarios Where id = scenarioTableRow.id;
   END LOOP;
-
-  DELETE FROM scenarios Where isDeleted = true;
 END
 $$
 LANGUAGE PLPGSQL;
