@@ -91,13 +91,17 @@ BEGIN
       SELECT '"'||string_agg(column_name, '", "')||'"' INTO tableFields FROM information_schema.columns WHERE table_schema = 'data' AND table_name = currentTableName AND LOWER(column_name) NOT IN ('id', 'scenarioid');
       SELECT string_agg('t."'||column_name||'" = i."'||column_name||'"', ' AND ') INTO keyMapQuery FROM information_schema.columns WHERE table_schema = 'data' AND table_name = currentTableName AND LOWER(column_name) NOT IN ('id', 'scenarioid');
       
-      insertQuery = 'WITH insertedData AS (INSERT INTO data."'||currentTableName||'"(scenarioId, '||tableFields||') SELECT '||insertedId::varchar(255)||', '||tableFields||' FROM data."'||currentTableName||'" WHERE scenarioId = '||sourceScenarioId::varchar(255)||' RETURNING *) INSERT INTO keysMapping SELECT '''||currentTableName||''', 666, 777 FROM insertedData i JOIN data."'||currentTableName||'" t ON t.scenarioId='||sourceScenarioId::varchar(255)||' AND '||keyMapQuery||';';
-      
+      IF EXISTS (SELECT 1 FROM utils.scenarioTableForeignKeys WHERE pkTable = currentTableName) THEN        
+        insertQuery = 'WITH insertedData AS (INSERT INTO data."'||currentTableName||'"(scenarioId, '||tableFields||') SELECT '||insertedId::varchar(255)||', '||tableFields||' FROM data."'||currentTableName||'" WHERE scenarioId = '||sourceScenarioId::varchar(255)||' RETURNING *) INSERT INTO keysMapping SELECT '''||currentTableName||''', t.id, i.id FROM insertedData i JOIN data."'||currentTableName||'" t ON t.scenarioId='||sourceScenarioId::varchar(255)||' AND '||keyMapQuery||';';
+      ELSE
+        insertQuery = 'INSERT INTO data."'||currentTableName||'"(scenarioId, '||tableFields||') SELECT '||insertedId::varchar(255)||', '||tableFields||' FROM data."'||currentTableName||'" WHERE scenarioId = '||sourceScenarioId::varchar(255)||';';
+      END IF;
+
       EXECUTE insertQuery;
       RAISE NOTICE 'query = %', insertQuery;
 
       FOR fkRow IN SELECT * FROM utils.scenarioTableForeignKeys WHERE fkTable = currentTableName LOOP
-        fkUpdateQuery = 'UPDATE data."'||currentTableName||'" d SET d."'||fkRow.fkColumn||'" = t.newId FROM keysMapping t WHERE t.oldId = d."'||fkRow.fkColumn||'" AND t.tableName = '''||fkRow.pkTable||''' AND d.scenarioId='||insertedId::varchar(255)||';';
+        fkUpdateQuery = 'UPDATE data."'||currentTableName||'" d SET "'||fkRow.fkColumn||'" = t.newId FROM keysMapping t WHERE t.oldId = d."'||fkRow.fkColumn||'" AND t.tableName = '''||fkRow.pkTable||''' AND d.scenarioId='||insertedId::varchar(255)||';';
 
         EXECUTE fkUpdateQuery;
         
